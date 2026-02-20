@@ -2,15 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/user"
 	"path/filepath"
 )
 
-// Config: Configuration structure.
+// Config holds the application configuration.
 type Config struct {
 	RaidTablePath string   `json:"raid_table_path"`
 	Services      []string `json:"services"`
@@ -18,7 +16,7 @@ type Config struct {
 	EncryptionKey string `json:"encryption_key"`
 }
 
-// ReadConfig: Read the configuration file.
+// ReadConfig reads and parses the configuration file.
 func (a *App) ReadConfig() {
 	usr, err := user.Current()
 	if err != nil {
@@ -37,27 +35,33 @@ func (a *App) ReadConfig() {
 
 	// Determine which configuration to use.
 	var configFile string
-	if _, err := os.Stat(app.flags.ConfigPath); err == nil && app.flags.ConfigPath != "" {
+	if app.flags.ConfigPath != "" {
+		if _, err := os.Stat(app.flags.ConfigPath); err != nil {
+			log.Fatalln("Specified configuration file does not exist:", app.flags.ConfigPath)
+		}
 		configFile = app.flags.ConfigPath
-	} else if _, err := os.Stat(localConfig); err == nil {
-		configFile = localConfig
-	} else if _, err := os.Stat(homeDirConfig); err == nil {
-		configFile = homeDirConfig
-	} else if _, err := os.Stat(etcConfig); err == nil {
-		configFile = etcConfig
 	} else {
-		log.Println("Unable to find a configuration file.")
-		return
+		// Search standard paths in priority order.
+		for _, candidate := range []string{localConfig, homeDirConfig, etcConfig} {
+			if _, err := os.Stat(candidate); err == nil {
+				configFile = candidate
+				break
+			}
+		}
+		if configFile == "" {
+			log.Println("Unable to find a configuration file.")
+			return
+		}
 	}
 
-	jsonFile, err := ioutil.ReadFile(configFile)
+	jsonFile, err := os.ReadFile(configFile)
 	if err != nil {
-		fmt.Printf("Error reading JSON file: %s\n", err)
+		log.Printf("Error reading JSON file: %s\n", err)
 		return
 	}
 
 	err = json.Unmarshal(jsonFile, &app.config)
 	if err != nil {
-		fmt.Printf("Error parsing JSON file: %s\n", err)
+		log.Printf("Error parsing JSON file: %s\n", err)
 	}
 }

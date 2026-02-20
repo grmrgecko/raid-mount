@@ -1,6 +1,14 @@
 # Source Target FSType Flags CryptName Parallel
+#
+# The Parallel field controls mount ordering. Entries with Parallel=1 are
+# launched concurrently with the preceding entries. An entry with Parallel=0
+# acts as a barrier: all previously launched mounts must complete before it
+# starts. This lets you express dependencies by position — for example,
+# individual drives can mount in parallel, then a mergerfs union that depends
+# on them uses Parallel=0 to wait.
+
 /dev/sdb1 /mnt/sdb1 xfs defaults none 1
 /dev/sdc1 /mnt/sdc1 xfs defaults sdc1 1
 
-# Merged
+# Merged — waits for the parallel mounts above to finish before starting.
 /mnt/sdb1:/mnt/sdc1 /mnt/merged mergerfs config=/etc/mergerfs.ini,allow_other,use_ino,fsname=merged none 0

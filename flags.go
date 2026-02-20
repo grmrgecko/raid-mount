@@ -6,14 +6,14 @@ import (
 	"os"
 )
 
-// Flags: Configuration options for cli execution.
+// Flags holds configuration options for CLI execution.
 type Flags struct {
 	ConfigPath         string
 	EncryptionKey      string
 	EncryptionPassword string
 }
 
-// Init: Parses configuration options.
+// Init parses configuration options from command-line flags.
 func (f *Flags) Init() {
 	flag.Usage = func() {
 		fmt.Printf("raid-mount: Mounts raid drives and starts services\n\nUsage:\n")
@@ -29,7 +29,7 @@ func (f *Flags) Init() {
 	flag.StringVar(&f.ConfigPath, "c", "", usage+" (shorthand)")
 
 	flag.StringVar(&f.EncryptionKey, "encryption-key", "", "Keyfile to decrypt drives")
-	usage = "Password to decrypt drives"
+	usage = "Password to decrypt drives (visible in process list; prefer RAID_MOUNT_ENCRYPTION_PASSWORD env var)"
 	flag.StringVar(&f.EncryptionPassword, "encryption-password", "", usage)
 	flag.StringVar(&f.EncryptionPassword, "p", "", usage+" (shorthand)")
 
