@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -34,7 +35,14 @@ type App struct {
 var app *App
 
 // isMounted checks /proc/mounts for a target mountpoint to determine if it is mounted.
+// Symlinks in the target path are resolved so the comparison matches the real
+// paths recorded by the kernel.
 func isMounted(target string) bool {
+	cleanTarget := filepath.Clean(target)
+	if resolved, err := filepath.EvalSymlinks(cleanTarget); err == nil {
+		cleanTarget = resolved
+	}
+
 	file, err := os.Open("/proc/mounts")
 	if err != nil {
 		log.Fatal(err)
@@ -47,7 +55,7 @@ func isMounted(target string) bool {
 		if len(args) < 3 {
 			continue
 		}
-		if args[1] == target {
+		if filepath.Clean(args[1]) == cleanTarget {
 			return true
 		}
 	}
