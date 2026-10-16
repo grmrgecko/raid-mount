@@ -8,19 +8,29 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
+)
+
+// Mount helpers that background themselves can take a moment for their mount to
+// become visible in the mount table, so verification polls instead of sampling
+// once.
+const (
+	mountSettleTimeout = 2 * time.Second
+	mountSettlePoll    = 20 * time.Millisecond
 )
 
 // RaidMount holds mount point details parsed from the raid table.
 type RaidMount struct {
 	Source    string
-	Target   string
-	FSType   string
-	Flags    string
+	Target    string
+	FSType    string
+	Flags     string
 	CryptName string
 	Encrypted bool
 	Parallel  bool
@@ -34,18 +44,48 @@ type App struct {
 
 var app *App
 
-// isMounted checks /proc/mounts for a target mountpoint to determine if it is mounted.
-// Symlinks in the target path are resolved so the comparison matches the real
-// paths recorded by the kernel.
-func isMounted(target string) bool {
+// unescapeMountField decodes the octal escapes the kernel writes into
+// /proc/mounts for characters that would otherwise break field splitting:
+// space, tab, newline, and backslash. Without this a mountpoint containing a
+// space never matches and is reported as unmounted.
+func unescapeMountField(field string) string {
+	if !strings.Contains(field, `\`) {
+		return field
+	}
+
+	var b strings.Builder
+	for i := 0; i < len(field); i++ {
+		// Escapes are always a backslash followed by exactly three octal digits.
+		if field[i] == '\\' && i+3 < len(field) {
+			if v, err := strconv.ParseUint(field[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(field[i])
+	}
+	return b.String()
+}
+
+// isMounted checks /proc/mounts for a target mountpoint to determine if it is
+// mounted. A read failure is returned rather than treated as "not mounted",
+// since the two are otherwise indistinguishable and the caller would go on to
+// stack a second mount on the same target.
+func isMounted(target string) (bool, error) {
+	// Compare against both the resolved and unresolved forms. The kernel records
+	// fully resolved paths, but EvalSymlinks fails when any component is
+	// temporarily unreachable, and falling back to only the unresolved path
+	// would silently report a live mount as missing.
 	cleanTarget := filepath.Clean(target)
+	candidates := map[string]bool{cleanTarget: true}
 	if resolved, err := filepath.EvalSymlinks(cleanTarget); err == nil {
-		cleanTarget = resolved
+		candidates[resolved] = true
 	}
 
 	file, err := os.Open("/proc/mounts")
 	if err != nil {
-		log.Fatal(err)
+		return false, fmt.Errorf("read mount table: %w", err)
 	}
 	defer file.Close()
 
@@ -55,11 +95,31 @@ func isMounted(target string) bool {
 		if len(args) < 3 {
 			continue
 		}
-		if filepath.Clean(args[1]) == cleanTarget {
-			return true
+		if candidates[filepath.Clean(unescapeMountField(args[1]))] {
+			return true, nil
 		}
 	}
-	return false
+	// A truncated scan looks identical to a target that is simply absent.
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("read mount table: %w", err)
+	}
+	return false, nil
+}
+
+// waitMounted polls the mount table for target, giving a helper that has
+// already exited a brief window for its mount to become visible.
+func waitMounted(target string) (bool, error) {
+	deadline := time.Now().Add(mountSettleTimeout)
+	for {
+		mounted, err := isMounted(target)
+		if err != nil || mounted {
+			return mounted, err
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(mountSettlePoll)
+	}
 }
 
 // closeLUKS attempts to close a LUKS volume by name, logging any failure.
@@ -83,7 +143,11 @@ func closeLUKS(cryptName string) {
 // Either side of the "|" may be empty. If no "|" is present the entire Flags
 // string is treated as bindfs native flags with no -o options.
 func mountBindfs(mount RaidMount) error {
-	if isMounted(mount.Target) {
+	mounted, err := isMounted(mount.Target)
+	if err != nil {
+		return err
+	}
+	if mounted {
 		fmt.Println(mount.Target, "is already mounted")
 		return nil
 	}
@@ -124,7 +188,13 @@ func mountBindfs(mount RaidMount) error {
 		return fmt.Errorf("bindfs %s: %w", mount.Target, err)
 	}
 
-	if !isMounted(mount.Target) {
+	// bindfs backgrounds itself once the mount is established, so poll rather
+	// than sampling the mount table a single time.
+	mounted, err = waitMounted(mount.Target)
+	if err != nil {
+		return err
+	}
+	if !mounted {
 		return fmt.Errorf("unable to mount: %s", mount.Target)
 	}
 	return nil
@@ -198,7 +268,14 @@ func mountDrive(mount RaidMount, encryptionPassword string) error {
 	}
 
 	// If we're already mounted on this mountpoint, skip.
-	if isMounted(mount.Target) {
+	mounted, err := isMounted(mount.Target)
+	if err != nil {
+		if mount.Encrypted && openedLUKS {
+			closeLUKS(mount.CryptName)
+		}
+		return err
+	}
+	if mounted {
 		fmt.Println(mount.Target, "is already mounted")
 		return nil
 	}
@@ -222,12 +299,17 @@ func mountDrive(mount RaidMount, encryptionPassword string) error {
 		return fmt.Errorf("mount %s: %w", mount.Target, err)
 	}
 
-	// Verify that it actually mounted.
-	if !isMounted(mount.Target) {
+	// Verify that it actually mounted. FUSE-backed filesystems such as mergerfs
+	// background themselves, so allow the same settle window used for bindfs.
+	mounted, err = waitMounted(mount.Target)
+	if err == nil && !mounted {
+		err = fmt.Errorf("unable to mount: %s", mount.Target)
+	}
+	if err != nil {
 		if mount.Encrypted && openedLUKS {
 			closeLUKS(mount.CryptName)
 		}
-		return fmt.Errorf("unable to mount: %s", mount.Target)
+		return err
 	}
 	return nil
 }
